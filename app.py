@@ -237,11 +237,9 @@ def quote(m, tok):
     q = m["quotes"].get(tok)
     if (not q or abs(q["bid"]["price"] - bid) > 1e-9 or abs(q["ask"]["price"] - ask) > 1e-9):
         aa = time.time() + LATENCY_MS / 1000.0
-        # "ahead" = quanto assumimos que esta na frente na fila. Fila CRUA (todo o
-        # nivel) quase nunca enche; assumimos no maximo ~2 ordens na frente.
-        cap = QUOTE_SIZE * 2
-        m["quotes"][tok] = {"bid": {"price": bid, "active_at": aa, "ahead": min(b.get("bb_sz", 0), cap)},
-                            "ask": {"price": ask, "active_at": aa, "ahead": min(b.get("ba_sz", 0), cap)}}
+        # fila REAL: tamanho do nivel (sem cap) — FIFO de verdade
+        m["quotes"][tok] = {"bid": {"price": bid, "active_at": aa, "ahead": float(b.get("bb_sz") or 0)},
+                            "ask": {"price": ask, "active_at": aa, "ahead": float(b.get("ba_sz") or 0)}}
 
 
 def on_trade(m, ev):
