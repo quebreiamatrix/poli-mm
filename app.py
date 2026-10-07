@@ -634,7 +634,7 @@ def snapshot():
                     "banca": round(LA_BANCA + la_realized, 2),
                     "peak": round(STATE["la_peak"], 2),
                     "adverse": round(adv_total, 2), "adv_n": adv_n,
-                    "pnl_adj": round(la_realized - adv_total, 2),
+                    "pnl_adj": round(la_realized - max(0.0, adv_total), 2),
                     "open_cash": round(sum(m["la"]["cash"] for m in STATE["markets"].values()), 2),
                     "equity": la_eq,
                     "sold": round(sum(sum(m["la"]["sold"].values()) for m in STATE["markets"].values()), 1),
