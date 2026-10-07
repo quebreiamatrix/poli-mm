@@ -12,6 +12,7 @@ import time
 Q = queue.Queue()
 _path = None
 _last_tick = {}
+PAUSED = False
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS markets(
@@ -60,18 +61,34 @@ def collect_start():
 
 
 def reset():
-    """Zera os dados e reinicia o cronometro de coleta."""
+    """Zera os dados e reinicia o cronometro de coleta.
+
+    Descarta primeiro a fila de gravação pendente para que linhas antigas
+    não voltem ao banco depois do DELETE.
+    """
+    global PAUSED
     if not _path:
         return
-    con = sqlite3.connect(_path)
-    for t in DATA_TABLES:
-        try:
-            con.execute("DELETE FROM " + t)
-        except Exception:
-            pass
-    con.execute("INSERT OR REPLACE INTO meta VALUES ('collect_start', ?)", (str(int(time.time())),))
-    con.commit()
-    con.close()
+    PAUSED = True
+    try:
+        while True:
+            try:
+                Q.get_nowait()
+            except queue.Empty:
+                break
+        con = sqlite3.connect(_path)
+        for t in DATA_TABLES:
+            try:
+                con.execute("DELETE FROM " + t)
+            except Exception:
+                pass
+        now = str(int(time.time()))
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('collect_start', ?)", (now,))
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('last_reset', ?)", (now,))
+        con.commit()
+        con.close()
+    finally:
+        PAUSED = False
 
 
 def _writer():
@@ -95,7 +112,7 @@ def _writer():
 
 
 def _ins(sql, args):
-    if _path:
+    if _path and not PAUSED:
         Q.put((sql, args))
 
 

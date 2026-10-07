@@ -947,7 +947,38 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/login")
             return
         if self.path.startswith("/reset"):
-            db.reset()
+            with LOCK:
+                db.reset()
+                STATE["markets"] = {}
+                globals()["TOK2M"] = {}
+                STATE["settled"] = []
+                STATE["la_settled"] = []
+                STATE["target_fills"] = []
+                STATE["target_trades"] = []
+                STATE["recent_trades"] = []
+                STATE["pnl_series"] = []
+                STATE["peak_open"] = 0.0
+                STATE["la_peak"] = 0.0
+                STATE["books_seen"] = 0
+                STATE["trades_seen"] = 0
+                STATE["totals"] = {"cost": 0.0, "payout": 0.0, "pnl": 0.0, "fills": 0,
+                                   "markets": 0, "wins": 0, "losses": 0,
+                                   "spread_captured": 0.0, "shares_filled": 0.0}
+                STATE["mirror"] = {"n": 0, "slip_sum": 0.0, "late_sum": 0.0}
+                STATE["onchain"] = {"last_block": STATE["onchain"].get("last_block", 0),
+                                     "events": 0, "err": ""}
+                STATE["anon"]["oc"] = {"last_block": STATE["anon"].get("oc", {}).get("last_block", 0),
+                                        "events": 0, "err": ""}
+                STATE["anon"]["trades"] = []
+                STATE["anon"]["trades"] = []
+                STATE["anon"]["fills"] = []
+                STATE["anon"]["sell_usdc"] = 0.0
+                STATE["anon"]["split"] = 0.0
+                STATE["anon"]["merge"] = 0.0
+                STATE["anon"]["redeem"] = 0.0
+                STATE["anon"]["curves"] = {}
+                STATE["errors"] = ["%s reset executado" % time.strftime("%H:%M:%S")]
+                STATE["last_reset"] = int(time.time())
             self._redirect("/")
             return
         if self.path.startswith("/state"):
