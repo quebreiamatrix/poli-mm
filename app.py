@@ -58,6 +58,7 @@ LA_MAX_PER_TOKEN = 1500
 LA_NET_CAP = 75           # teto de estoque de um lado
 LA_BANCA = 100.0
 LA_USD = 75.0             # capital de SPLIT por mercado (parametrizavel)
+HAIRCUT = 0.149           # calibracao vs taxa real do Anon (~15%) — aplicado nos fills
 MATCH_WINDOW_S = 20        # "entramos junto" = fill nosso na mesma moeda em +/- 20s
 
 # --- feed on-chain em tempo real da carteira alvo ---
@@ -275,7 +276,7 @@ def on_trade(m, ev):
         pr = q["ask"]["price"]
         lvl = float(b.get("ba_sz") or 0)          # tamanho no nivel do nosso ask
         share = LA_SIZE / (lvl + LA_SIZE)         # fracao proporcional que pegaríamos da fila
-        la["acc"] = la.get("acc", 0.0) + size * share
+        la["acc"] = la.get("acc", 0.0) + size * share * HAIRCUT
         qty = int(la["acc"])                      # acumula ate 1 share inteira
         if qty > 0:
             la["acc"] -= qty
@@ -321,7 +322,7 @@ def on_trade(m, ev):
             return
         pr = qq["price"]
         room = max(0.0, (MAX_USD_PER_TOKEN / pr) - m["inv"][tok]) if pr > 0 else 0.0
-        qty = min(QUOTE_SIZE, size, room)
+        qty = min(QUOTE_SIZE, size, room) * HAIRCUT
         if qty > 0:
             m["inv"][tok] += qty
             m["cash"] -= qty * pr
@@ -347,7 +348,7 @@ def on_trade(m, ev):
         if size <= 0:
             return
         pr = qq["price"]
-        qty = min(QUOTE_SIZE, size, max(0.0, m["inv"][tok]))   # NAO shorta: so vende o que tem
+        qty = min(QUOTE_SIZE, size, max(0.0, m["inv"][tok])) * HAIRCUT   # NAO shorta: so vende o que tem
         if qty > 0:
             m["inv"][tok] -= qty
             m["cash"] += qty * pr
