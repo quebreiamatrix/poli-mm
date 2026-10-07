@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import net
 import clob_signer
+import db
 
 # ----------------------------- config -----------------------------
 ASSETS = ["btc", "eth", "sol"]
@@ -52,10 +53,11 @@ TARGET_WALLET = {
 }
 
 ANON_ADDR = "0x5916ce250c0b3e32eed3303ffb2938cab0b42a0b"
-LA_SIZE = 5               # shares por ask do LikeAnon
-LA_MAX_PER_TOKEN = 1500   # teto de vendas por token no LikeAnon
-LA_NET_CAP = 8            # teto BEM baixo de estoque de um lado (quase neutro)
-LA_BANCA = 100.0          # banca simulada do LikeAnon (USDC) — nao gasta mais que isso em SPLIT
+LA_SIZE = 5               # shares por ask do LikeAnon (fracao da fila)
+LA_MAX_PER_TOKEN = 1500
+LA_NET_CAP = 75           # teto de estoque de um lado
+LA_BANCA = 100.0
+LA_USD = 75.0             # capital de SPLIT por mercado (parametrizavel)
 MATCH_WINDOW_S = 20        # "entramos junto" = fill nosso na mesma moeda em +/- 20s
 
 # --- feed on-chain em tempo real da carteira alvo ---
@@ -174,7 +176,11 @@ def discover(w):
 def register(slug, asset, cid, tokens):
     with LOCK:
         if slug not in STATE["markets"]:
-            STATE["markets"][slug] = mk_market(slug, asset, cid, tokens)
+            m = mk_market(slug, asset, cid, tokens)
+            STATE["markets"][slug] = m
+            up = next((k for k, v in tokens.items() if v == "Up"), "")
+            dn = next((k for k, v in tokens.items() if v == "Down"), "")
+            db.market(slug, asset, cid, up, dn, m["start"], m["end"])
         return STATE["markets"][slug]
 
 
@@ -190,6 +196,8 @@ def on_book(m, ev):
         "mid": ((bb[0] + ba[0]) / 2) if (bb and ba) else (bb[0] if bb else (ba[0] if ba else None)),
     }
     STATE["books_seen"] += 1
+    db.tick(tok, m["books"][tok].get("bb"), m["books"][tok].get("ba"),
+            m["books"][tok].get("bb_sz"), m["books"][tok].get("ba_sz"))
     quote(m, tok)
 
 
@@ -249,6 +257,10 @@ def on_trade(m, ev):
             "t": int(time.time()), "asset": m["asset"], "outcome": m["tokens"][tok],
             "side": side, "price": price, "size": size})
         STATE["recent_trades"] = STATE["recent_trades"][:40]
+    _ts = int(ev.get("timestamp") or time.time() * 1000)
+    if _ts > 10 ** 12:
+        _ts //= 1000
+    db.trade(_ts, tok, m["cid"], price, size, side, ev.get("transaction_hash"))
 
     # fila bilateral: compra se alguem VENDEU no nosso bid; vende se alguem COMPROU no nosso ask
     q = m["quotes"].get(tok)
@@ -274,7 +286,7 @@ def on_trade(m, ev):
             if need > 0:
                 with LOCK:
                     gcash = sum(mm["la"]["cash"] for mm in STATE["markets"].values())
-                need = min(need, max(0.0, gcash + LA_BANCA))
+                need = min(need, max(0.0, gcash + LA_BANCA), max(0.0, LA_USD - la["split"]))
                 qty = min(qty, int(la["inv"][tok] + need))
             if qty > 0:
                 if need > 0:
@@ -294,6 +306,7 @@ def on_trade(m, ev):
                     pass
                 la["fills"].append({"ts": int(now), "token": tok, "outcome": m["tokens"][tok],
                                     "price": pr, "size": qty, "signed": sig, "mid": mid, "adv": None})
+                db.la_fill(now, tok, m["tokens"][tok], pr, qty, mid, lvl)
                 mm2 = min(la["inv"].values())
                 if mm2 > 0:
                     for t2 in m["tokens"]:
@@ -372,6 +385,7 @@ def settle_market(m):
         if not mk.get("closed") and mx < 0.99:
             return False
         win_out = outs[prices.index(mx)]
+        db.resolution(m["cid"], win_out)
         win_tok = next((tk for tk, out in m["tokens"].items() if out == win_out), None)
         if win_tok is None:
             return False
@@ -1098,6 +1112,9 @@ def settler():
 
 def main():
     net.install(verbose=True)
+    dbpath = os.environ.get("PM_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "pm.db")
+    db.init(dbpath)
+    print("[poli-mm] DB:", dbpath)
     threading.Thread(target=processor, daemon=True).start()
     threading.Thread(target=ws_main, daemon=True).start()
     threading.Thread(target=onchain_poller, daemon=True).start()
