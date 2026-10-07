@@ -53,12 +53,12 @@ TARGET_WALLET = {
 }
 
 ANON_ADDR = "0x5916ce250c0b3e32eed3303ffb2938cab0b42a0b"
-LA_SIZE = 5               # shares por ask do LikeAnon (fracao da fila)
+LA_ORD = 30               # tamanho da nossa ordem (ask) — min 5 shares
 LA_MAX_PER_TOKEN = 1500
-LA_NET_CAP = 75           # teto de estoque de um lado
+LA_NET_CAP = 75
 LA_BANCA = 100.0
-LA_USD = 75.0             # capital de SPLIT por mercado (parametrizavel)
-HAIRCUT = 0.149           # calibracao vs taxa real do Anon (~15%) — aplicado nos fills
+LA_USD = 75.0
+HAIRCUT = 1.0             # FIFO ja e a calibracao; haircut extra opcional
 MATCH_WINDOW_S = 20        # "entramos junto" = fill nosso na mesma moeda em +/- 20s
 
 # --- feed on-chain em tempo real da carteira alvo ---
@@ -271,49 +271,55 @@ def on_trade(m, ev):
     b = m["books"].get(tok, {})
     mid = b.get("mid") or price
     # ---- LikeAnon: vende no ask; capta estoque via SPLIT ($1/par) quando faltar ----
-    if side == "BUY" and now >= q["ask"]["active_at"] and price >= q["ask"]["price"] - 1e-9:
+    if side == "BUY":
         la = m["la"]
         pr = q["ask"]["price"]
-        lvl = float(b.get("ba_sz") or 0)          # tamanho no nivel do nosso ask
-        share = LA_SIZE / (lvl + LA_SIZE)         # fracao proporcional que pegaríamos da fila
-        la["acc"] = la.get("acc", 0.0) + size * share * HAIRCUT
-        qty = int(la["acc"])                      # acumula ate 1 share inteira
-        if qty > 0:
-            la["acc"] -= qty
-            opp = next((x for x in m["tokens"] if x != tok), None)
-            room = max(0.0, LA_NET_CAP - (la["inv"].get(opp, 0) if opp else 0))
-            qty = min(qty, int(la["inv"][tok] + room), int(max(0.0, LA_MAX_PER_TOKEN - la["sold"][tok])))
-            need = max(0.0, qty - la["inv"][tok])
-            if need > 0:
-                with LOCK:
-                    gcash = sum(mm["la"]["cash"] for mm in STATE["markets"].values())
-                need = min(need, max(0.0, gcash + LA_BANCA), max(0.0, LA_USD - la["split"]))
-                qty = min(qty, int(la["inv"][tok] + need))
-            if qty > 0:
+        # FILA FIFO real: entra atras no nivel; so enche depois que o nivel for consumido
+        if la.get("q_lvl") != pr:
+            la["q_lvl"] = pr
+            la["q_ahead"] = float(b.get("ba_sz") or 0)
+        if now >= q["ask"]["active_at"] and price >= pr - 1e-9:
+            sz = size
+            if la.get("q_ahead", 0) > 0:
+                tak = min(la["q_ahead"], sz)
+                la["q_ahead"] -= tak
+                sz -= tak
+            if sz > 0:
+                opp = next((x for x in m["tokens"] if x != tok), None)
+                room = max(0.0, LA_NET_CAP - (la["inv"].get(opp, 0) if opp else 0))
+                qty = min(sz, LA_ORD, la["inv"][tok] + room, max(0.0, LA_MAX_PER_TOKEN - la["sold"][tok]))
+                need = max(0.0, qty - la["inv"][tok])
                 if need > 0:
-                    for t2 in m["tokens"]:
-                        la["inv"][t2] += need
-                    la["cash"] -= need
-                    la["split"] += need
-                la["inv"][tok] -= qty
-                la["cash"] += qty * pr
-                la["sold"][tok] += qty
-                sig = ""
-                try:
-                    info = clob_signer.sign(tok, "SELL", pr, qty)
-                    if info.get("sig"):
-                        sig = info.get("hash") or ("ASSINADA · sig " + info["sig"])
-                except Exception:
-                    pass
-                la["fills"].append({"ts": int(now), "token": tok, "outcome": m["tokens"][tok],
-                                    "price": pr, "size": qty, "signed": sig, "mid": mid, "adv": None})
-                db.la_fill(now, tok, m["tokens"][tok], pr, qty, mid, lvl)
-                mm2 = min(la["inv"].values())
-                if mm2 > 0:
-                    for t2 in m["tokens"]:
-                        la["inv"][t2] -= mm2
-                    la["cash"] += mm2
-                    la["merged"] = round(la["merged"] + mm2, 2)
+                    with LOCK:
+                        gcash = sum(mm["la"]["cash"] for mm in STATE["markets"].values())
+                    need = min(need, max(0.0, gcash + LA_BANCA), max(0.0, LA_USD - la["split"]))
+                    qty = min(qty, la["inv"][tok] + need)
+                qty = int(qty)
+                if qty > 0:
+                    if need > 0:
+                        for t2 in m["tokens"]:
+                            la["inv"][t2] += need
+                        la["cash"] -= need
+                        la["split"] += need
+                    la["inv"][tok] -= qty
+                    la["cash"] += qty * pr
+                    la["sold"][tok] += qty
+                    sig = ""
+                    try:
+                        info = clob_signer.sign(tok, "SELL", pr, qty)
+                        if info.get("sig"):
+                            sig = info.get("hash") or ("ASSINADA · sig " + info["sig"])
+                    except Exception:
+                        pass
+                    la["fills"].append({"ts": int(now), "token": tok, "outcome": m["tokens"][tok],
+                                        "price": pr, "size": qty, "signed": sig, "mid": mid, "adv": None})
+                    db.la_fill(now, tok, m["tokens"][tok], pr, qty, mid, b.get("ba_sz") or 0)
+                    mm2 = min(la["inv"].values())
+                    if mm2 > 0:
+                        for t2 in m["tokens"]:
+                            la["inv"][t2] -= mm2
+                        la["cash"] += mm2
+                        la["merged"] = round(la["merged"] + mm2, 2)
     if side == "SELL" and now >= q["bid"]["active_at"] and price <= q["bid"]["price"] + 1e-9:
         qq = q["bid"]
         if qq.get("ahead", 0) > 0:                    # consome a fila na frente primeiro

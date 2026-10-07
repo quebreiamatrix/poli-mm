@@ -23,7 +23,16 @@ SIZE = 5            # shares por ordem
 BANCA = 100.0
 NET_CAP = 8         # teto de estoque de um lado (ANON)
 LATENCY = 0.25      # s (taker delay)
-HAIRCUT = float(__import__("os").environ.get("HAIRCUT", "0.149"))  # calibr. vs taxa real do Anon (~15%)
+HAIRCUT = float(__import__("os").environ.get("HAIRCUT", "0.149"))  # default p/ token sem calibracao
+try:
+    import json as _json
+    CALIB = _json.load(open("calib_tok.json"))
+except Exception:
+    CALIB = {}
+
+
+def ftok(tok):
+    return CALIB.get(tok, HAIRCUT)     # fator por token (calibrado), fallback global
 
 
 def load():
@@ -73,7 +82,7 @@ def sim(markets, ticks, trades, res):
                 if bb is None or side != "SELL" or price > bb + 1e-9:
                     continue
                 f = SIZE / ((bb_sz or 0) + SIZE)          # fila proporcional
-                q = size * f * HAIRCUT                     # calibrado vs Anon real
+                q = size * f * ftok(tok)                   # fator POR TOKEN (calibrado)
                 room = max(0.0, (BANCA - mm_cost))
                 q = min(q, room / price if price else 0)
                 if q > 0:
@@ -97,7 +106,7 @@ def sim(markets, ticks, trades, res):
                 if ba is None or side != "BUY" or price < ba - 1e-9:
                     continue
                 f = SIZE / ((ba_sz or 0) + SIZE)
-                q = size * f * HAIRCUT
+                q = size * f * ftok(tok)
                 room = max(0.0, NET_CAP - la_inv[opp])
                 q = min(q, la_inv[tok] + room)
                 need = max(0.0, q - la_inv[tok])
