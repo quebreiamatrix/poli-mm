@@ -23,6 +23,7 @@ SIZE = 5            # shares por ordem
 BANCA = 100.0
 NET_CAP = 8         # teto de estoque de um lado (ANON)
 LATENCY = 0.25      # s (taker delay)
+HAIRCUT = float(__import__("os").environ.get("HAIRCUT", "0.149"))  # calibr. vs taxa real do Anon (~15%)
 
 
 def load():
@@ -72,7 +73,7 @@ def sim(markets, ticks, trades, res):
                 if bb is None or side != "SELL" or price > bb + 1e-9:
                     continue
                 f = SIZE / ((bb_sz or 0) + SIZE)          # fila proporcional
-                q = size * f
+                q = size * f * HAIRCUT                     # calibrado vs Anon real
                 room = max(0.0, (BANCA - mm_cost))
                 q = min(q, room / price if price else 0)
                 if q > 0:
@@ -96,7 +97,7 @@ def sim(markets, ticks, trades, res):
                 if ba is None or side != "BUY" or price < ba - 1e-9:
                     continue
                 f = SIZE / ((ba_sz or 0) + SIZE)
-                q = size * f
+                q = size * f * HAIRCUT
                 room = max(0.0, NET_CAP - la_inv[opp])
                 q = min(q, la_inv[tok] + room)
                 need = max(0.0, q - la_inv[tok])

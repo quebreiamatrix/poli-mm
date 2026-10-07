@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS trades(
   ts INT, token TEXT, condition TEXT, price REAL, size REAL, side TEXT, tx TEXT);
 CREATE TABLE IF NOT EXISTS la_fills(
   ts INT, token TEXT, outcome TEXT, price REAL, size REAL, mid REAL, queue REAL);
+CREATE TABLE IF NOT EXISTS anon_fills(
+  ts INT, token TEXT, side TEXT, price REAL, size REAL);
 CREATE TABLE IF NOT EXISTS resolutions(
   condition TEXT PRIMARY KEY, winner TEXT, ts INT);
 CREATE INDEX IF NOT EXISTS ix_ticks_ts ON ticks(ts);
@@ -89,6 +91,11 @@ def trade(ts, token, condition, price, size, side, tx):
 def la_fill(ts, token, outcome, price, size, mid, queue_ahead):
     _ins("INSERT INTO la_fills VALUES (?,?,?,?,?,?,?)",
          (int(ts), token, outcome, price, size, mid, queue_ahead))
+
+
+def anon_fill(ts, token, side, price, size):
+    _ins("INSERT INTO anon_fills VALUES (?,?,?,?,?)",
+         (int(ts), token, side, price, size))
 
 
 def resolution(condition, winner, ts=None):

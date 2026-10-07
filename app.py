@@ -1041,6 +1041,8 @@ def anon_onchain_poller():
                     STATE["anon"]["fills"].sort(key=lambda x: (x["t"], x["block"]), reverse=True)
                     STATE["anon"]["fills"] = STATE["anon"]["fills"][:400]
                     STATE["anon"]["oc"]["events"] += len(new)
+            for f in new:
+                db.anon_fill(f["t"], f["token"], f["side"], f["price"], f["size"])
             last = bn
         except Exception as e:
             with LOCK:
