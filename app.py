@@ -646,6 +646,7 @@ def snapshot():
         for smk in STATE["settled"]:
             cum += smk["pnl"]; eq.append(round(cum, 2))
         return {"mode": STATE["mode"], "ws": STATE["ws"], "uptime": int(time.time() - STATE["started"]),
+                "collect_s": int(time.time()) - db.collect_start(),
                 "latency_ms": STATE["latency_ms"], "books_seen": STATE["books_seen"],
                 "trades_seen": STATE["trades_seen"],
                 "markets": sorted(markets, key=lambda x: x["slug"]),
@@ -729,6 +730,8 @@ canvas{width:100%;background:#0d1118;border:1px solid var(--line);border-radius:
 </div><script>
 function f(x,d){return x==null?'—':Number(x).toFixed(d==null?2:d)}
 function money(x){return `<span class="${x>=0?'g':'r'}">${x>=0?'+':''}$${f(x)}</span>`}
+function fmtDur(s){s=Math.max(0,s|0);const d=(s/86400)|0,h=((s%86400)/3600)|0,m=((s%3600)/60)|0,ss=s%60;
+ return (d?d+'d ':'')+(h?h+'h ':'')+(m?m+'m ':'')+ss+'s';}
 let TARGET=null;
 fetch('/target').then(r=>r.json()).then(t=>{TARGET=t;drawTgt();}).catch(()=>{});
 function drawChart(cv,data,color){
@@ -758,6 +761,7 @@ async function tick(){let s;try{s=await(await fetch('/state')).json()}catch(e){r
  document.getElementById('upd').textContent='lat '+s.latency_ms+'ms · up '+s.uptime+'s · books '+s.books_seen+' · trades '+s.trades_seen+' · onchain bloco '+s.onchain.last_block+' ('+s.onchain.events+' fills alvo) · assinador '+((s.signer&&s.signer.wallet)?(s.signer.wallet.slice(0,8)+'..'+(s.signer.post?' POST ON':' assina-sem-enviar')):'OFF');
  const t=s.totals,wr=t.markets?100*t.wins/t.markets:0;
  document.getElementById('cards').innerHTML=`
+ <div class="card"><div class="k">Tempo de coleta</div><div class="v b">${fmtDur(s.collect_s)}</div><div class="small">desde o último reset</div></div>
  <div class="card"><div class="k">PnL realizado</div><div class="v">${money(t.pnl)}</div><div class="small">${t.markets} merc. fechados</div></div>
  <div class="card"><div class="k">PnL em aberto</div><div class="v">${money(t.open_pnl)}</div><div class="small">janela atual</div></div>
  <div class="card"><div class="k">Investido (aberto)</div><div class="v">$${f(t.open_cost)}</div><div class="small">de $${f(t.banca)} (${f(100*t.open_cost/(t.banca||1),0)}%)</div></div>
@@ -819,6 +823,7 @@ async function tick(){let s;try{s=await(await fetch('/state')).json()}catch(e){r
  for(const r of (an.oc_fills||[]).slice(0,25)){ao+=`<tr><td>${new Date(r.t*1000).toLocaleTimeString()}</td><td class="small">${String(r.token).slice(0,8)}…</td><td class="${r.side==='SELL'?'sell':'buy'}">${r.side}</td><td>${f(r.price,2)}</td><td>${f(r.size,1)}</td><td class="${r.matched?'g':'small'}">${r.matched?'✔ SIM':'— não'}</td></tr>`}
  document.getElementById('anonoc').innerHTML=(an.oc_fills&&an.oc_fills.length)?ao+'</table>':'<div class="small">sem fills on-chain do Anon ainda…</div>';
  let lh='<div class="grid" style="margin-bottom:10px">'
+  +`<div class="card"><div class="k">Tempo de coleta</div><div class="v b">${fmtDur(s.collect_s)}</div><div class="small">último reset</div></div>`
   +`<div class="card"><div class="k">PnL realizado</div><div class="v ${la.realized>=0?'g':'r'}">$${f(la.realized)}</div><div class="small">${la.settled.length} merc</div></div>`
   +`<div class="card"><div class="k">Caixa aberto</div><div class="v">$${f(la.open_cash)}</div></div>`
   +`<div class="card"><div class="k">Vendido</div><div class="v">${f(la.sold,0)} sh</div></div>`
@@ -898,6 +903,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self._authed():
             self._redirect("/login")
+            return
+        if self.path.startswith("/reset"):
+            db.reset()
+            self._redirect("/")
             return
         if self.path.startswith("/state"):
             body = json.dumps(snapshot()).encode(); ctype = "application/json"

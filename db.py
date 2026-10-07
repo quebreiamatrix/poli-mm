@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS resolutions(
 CREATE INDEX IF NOT EXISTS ix_ticks_ts ON ticks(ts);
 CREATE INDEX IF NOT EXISTS ix_trades_ts ON trades(ts);
 CREATE INDEX IF NOT EXISTS ix_lafill_ts ON la_fills(ts);
+CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
+
+DATA_TABLES = ("ticks", "trades", "la_fills", "anon_fills", "resolutions", "markets")
 
 
 def init(path):
@@ -37,10 +40,38 @@ def init(path):
     _path = path
     con = sqlite3.connect(path)
     con.executescript(SCHEMA)
+    con.execute("INSERT OR IGNORE INTO meta VALUES ('collect_start', ?)", (str(int(time.time())),))
     con.commit()
     con.close()
     threading.Thread(target=_writer, daemon=True).start()
     return path
+
+
+def collect_start():
+    if not _path:
+        return int(time.time())
+    try:
+        con = sqlite3.connect(_path)
+        r = con.execute("SELECT v FROM meta WHERE k='collect_start'").fetchone()
+        con.close()
+        return int(r[0]) if r else int(time.time())
+    except Exception:
+        return int(time.time())
+
+
+def reset():
+    """Zera os dados e reinicia o cronometro de coleta."""
+    if not _path:
+        return
+    con = sqlite3.connect(_path)
+    for t in DATA_TABLES:
+        try:
+            con.execute("DELETE FROM " + t)
+        except Exception:
+            pass
+    con.execute("INSERT OR REPLACE INTO meta VALUES ('collect_start', ?)", (str(int(time.time())),))
+    con.commit()
+    con.close()
 
 
 def _writer():
