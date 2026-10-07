@@ -29,6 +29,21 @@ import urllib.request
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+try:
+    import orjson as _orjson
+
+    def _loads(s):
+        if isinstance(s, (bytes, bytearray, memoryview)):
+            return _orjson.loads(s)
+        return _orjson.loads(str(s).encode("utf-8", "ignore"))
+
+    JSON_FAST = True
+except Exception:
+    def _loads(s):
+        return json.loads(s)
+
+    JSON_FAST = False
+
 import net
 import clob_signer
 import db
@@ -78,6 +93,9 @@ except Exception:
 LOCK = threading.Lock()
 MSGQ = queue.Queue()          # fila: reader (WS) -> processor (thread separada)
 TOK2M = {}                    # token_id -> market da janela corrente
+WS_LAST_MSG = 0.0             # timestamp da ultima mensagem WS recebida
+WS_RECONNECTS = 0             # reconexoes do WS nesta sessao
+WS_DROPPED = 0                # mensagens antigas descartadas da fila em sobrecarga
 STATE = {
     "started": time.time(), "mode": "DRY (sem ordens)", "latency_ms": LATENCY_MS,
     "quote_size": QUOTE_SIZE, "ws": "desconectado", "books_seen": 0, "trades_seen": 0,
@@ -445,25 +463,37 @@ async def run_window():
         await asyncio.sleep(3); return
 
     import websockets
-    async with websockets.connect(WS_URL, open_timeout=15, ping_interval=20) as ws:
+    async with websockets.connect(
+        WS_URL, open_timeout=15, ping_interval=20, ping_timeout=20,
+        max_size=10 * 1024 * 1024, compression=None, close_timeout=5,
+    ) as ws:
         await ws.send(json.dumps({"assets_ids": tokens, "type": "market"}))
         with LOCK:
             STATE["ws"] = "conectado (janela %d)" % w
         global TOK2M
         TOK2M = {tok: m for m in markets for tok in m["tokens"]}
         import websockets.exceptions as wexc
+        missed = 0
         while time.time() < end + 2:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=5)
             except asyncio.TimeoutError:
+                missed += 1
+                if missed >= 3:
+                    log_err("ws travado (sem msgs por ~15s); reconectando")
+                    break
                 continue
             except (wexc.ConnectionClosed, Exception) as e:
                 log_err("ws caiu (%s)" % type(e).__name__)
+                globals()["WS_RECONNECTS"] = globals().get("WS_RECONNECTS", 0) + 1
                 break
+            missed = 0
+            globals()["WS_LAST_MSG"] = time.time()
             # leitura PURA: so empurra pra fila. Quem processa e' a thread processor.
             if MSGQ.qsize() > 5000:
                 try:
                     MSGQ.get_nowait()
+                    globals()["WS_DROPPED"] = globals().get("WS_DROPPED", 0) + 1
                 except queue.Empty:
                     pass
             MSGQ.put_nowait(raw)
@@ -482,7 +512,7 @@ async def run_window():
 
 def process_raw(raw):
     try:
-        d = json.loads(raw)
+        d = _loads(raw)
     except Exception:
         return
     for ev in (d if isinstance(d, list) else [d]):
@@ -898,6 +928,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/logout"):
             self._redirect("/login", "pm_auth=; Path=/; Max-Age=0")
+            return
+        if self.path.startswith("/healthz"):
+            body = json.dumps({
+                "ok": True,
+                "ts": int(time.time()),
+                "ws": STATE.get("ws"),
+                "last_msg_age_s": round(time.time() - WS_LAST_MSG, 1) if WS_LAST_MSG else None,
+                "ws_reconnects": WS_RECONNECTS,
+                "ws_dropped": WS_DROPPED,
+                "queue": MSGQ.qsize(),
+                "trades_seen": STATE.get("trades_seen"),
+                "json_fast": JSON_FAST,
+            }).encode()
+            self._send(body, "application/json")
             return
         if not self._authed():
             self._redirect("/login")

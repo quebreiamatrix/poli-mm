@@ -1,3 +1,4 @@
 websockets
 py-clob-client
 eth-account
+orjson
