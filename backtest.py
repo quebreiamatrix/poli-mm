@@ -35,8 +35,8 @@ def ftok(tok):
     return CALIB.get(tok, HAIRCUT)     # fator por token (calibrado), fallback global
 
 
-def load():
-    con = sqlite3.connect(DB)
+def load(path=None):
+    con = sqlite3.connect(path or DB, timeout=20)
     con.row_factory = sqlite3.Row
     ticks = {}
     for r in con.execute("SELECT ts,token,bb,ba,bb_sz,ba_sz FROM ticks ORDER BY ts"):
@@ -169,6 +169,21 @@ def walk_forward(rows, key, k=3):
         part = rows[i * n:(i + 1) * n] if i < k - 1 else rows[i * n:]
         s = stats(part, key)
         out.append((i + 1, s.get("n", 0), s.get("pnl", 0), s.get("sharpe", 0)))
+    return out
+
+
+def run(path=None):
+    """Roda o backtest e devolve dict (para o endpoint /backtest)."""
+    ticks, trades, res, mk = load(path)
+    rows = sim(mk, ticks, trades, res)
+    out = {"resolved": len(rows),
+           "ticks": sum(len(v) for v in ticks.values()),
+           "trades": sum(len(v) for v in trades.values()),
+           "calib_tokens": len(CALIB)}
+    for key, name in (("mm_pnl", "mm"), ("la_pnl", "anon")):
+        out[name] = stats(rows, key)
+        out[name + "_ci"] = bootstrap_ci(rows, key)
+        out[name + "_wf"] = walk_forward(rows, key)
     return out
 
 

@@ -70,7 +70,7 @@ TARGET_WALLET = {
 ANON_ADDR = "0x5916ce250c0b3e32eed3303ffb2938cab0b42a0b"
 LA_ORD = 30               # tamanho da nossa ordem (ask) — min 5 shares
 LA_MAX_PER_TOKEN = 1500
-LA_NET_CAP = 75
+LA_NET_CAP = 5
 LA_BANCA = 100.0
 LA_USD = 75.0
 HAIRCUT = 1.0             # FIFO ja e a calibracao; haircut extra opcional
@@ -661,6 +661,8 @@ def snapshot():
         likeanon = {"realized": la_realized,
                     "banca": round(LA_BANCA + la_realized, 2),
                     "peak": round(STATE["la_peak"], 2),
+                    "net": round(la_inv.get("Up", 0.0) - la_inv.get("Down", 0.0), 1),
+                    "directional": abs(la_inv.get("Up", 0.0) - la_inv.get("Down", 0.0)) > 10,
                     "adverse": round(adv_total, 2), "adv_n": adv_n,
                     "pnl_adj": round(la_realized - max(0.0, adv_total), 2),
                     "open_cash": round(sum(m["la"]["cash"] for m in STATE["markets"].values()), 2),
@@ -860,6 +862,8 @@ async function tick(){let s;try{s=await(await fetch('/state')).json()}catch(e){r
   +`<div class="card"><div class="k">Pico aberto</div><div class="v">$${f(la.peak)}</div><div class="small">máx. de $100</div></div>`
   +`<div class="card"><div class="k">Seleção adversa</div><div class="v ${la.adverse>0?'r':'g'}">$${f(la.adverse)}</div><div class="small">${la.adv_n} amostras</div></div>`
   +`<div class="card"><div class="k">PnL AJUSTADO</div><div class="v ${la.pnl_adj>=0?'g':'r'}">$${f(la.pnl_adj)}</div><div class="small">conservador</div></div>`
+  +`<div class="card"><div class="k">Exposição líquida (Up−Down)</div><div class="v">${f(la.net,1)}</div><div class="small">tem que ficar ~0</div></div>`
+  +`<div class="card"><div class="k">Direcional?</div><div class="v ${la.directional?'r':'g'}">${la.directional?'SIM':'NÃO ✓'}</div><div class="small">${la.directional?'falhou a neutralidade':'neutro, cumprindo a regra'}</div></div>`
   +`<div class="card"><div class="k">Inventário (Up · Down)</div><div class="v" style="font-size:14px">${f(la.inv.Up||0,1)} · ${f(la.inv.Down||0,1)}</div></div></div>`;
  lh+='<table><tr><th>mercado</th><th>PnL</th><th>vendido</th><th>split</th></tr>';
  for(const r of la.settled){lh+=`<tr><td>${r.slug}</td><td class="${r.pnl>=0?'g':'r'}">$${f(r.pnl)}</td><td>${f(r.sold,0)}</td><td>${f(r.split,0)}</td></tr>`}
