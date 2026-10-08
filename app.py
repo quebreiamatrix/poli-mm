@@ -74,6 +74,12 @@ LA_NET_CAP = 5
 LA_BANCA = 100.0
 LA_USD = 75.0
 HAIRCUT = 1.0             # FIFO ja e a calibracao; haircut extra opcional
+
+# --- ARB 100% neutro (aba nova) ---
+ARB_SIZE = 10             # shares por perna do par
+ARB_THETA = 0.07          # taker fee (crypto): fee = theta * C * p * (1-p)
+ARB_MARGIN = 0.0          # lucro minimo exigido (apos taxas) por par
+ARB_COOLDOWN = 5          # s entre disparos no mesmo mercado
 MATCH_WINDOW_S = 20        # "entramos junto" = fill nosso na mesma moeda em +/- 20s
 
 # --- feed on-chain em tempo real da carteira alvo ---
@@ -106,6 +112,7 @@ STATE = {
     "pnl_series": [],            # [(epoch, pnl_total)] amostrado ao vivo
     "onchain": {"last_block": 0, "events": 0, "err": ""},
     "mirror": {"n": 0, "slip_sum": 0.0, "late_sum": 0.0},
+    "arb": {"pnl": 0.0, "sets": 0, "buy": 0, "sell": 0, "events": [], "last_opp": 0},
     "peak_open": 0.0,            # maior exposicao (USDC) ja empregada
     "la_peak": 0.0,              # maior capital aberto do LikeAnon
     "anon": {"trades": [], "sell_usdc": 0.0, "split": 0.0, "merge": 0.0, "redeem": 0.0,
@@ -218,6 +225,7 @@ def on_book(m, ev):
     db.tick(tok, m["books"][tok].get("bb"), m["books"][tok].get("ba"),
             m["books"][tok].get("bb_sz"), m["books"][tok].get("ba_sz"))
     quote(m, tok)
+    arb_check(m, time.time())
 
 
 def on_price_change(m, ev):
@@ -239,6 +247,7 @@ def on_price_change(m, ev):
     STATE["books_seen"] += len(touched)
     for tok in touched:
         quote(m, tok)
+    arb_check(m, time.time())
 
 
 def quote(m, tok):
@@ -258,6 +267,49 @@ def quote(m, tok):
         # fila REAL: tamanho do nivel (sem cap) — FIFO de verdade
         m["quotes"][tok] = {"bid": {"price": bid, "active_at": aa, "ahead": float(b.get("bb_sz") or 0)},
                             "ask": {"price": ask, "active_at": aa, "ahead": float(b.get("ba_sz") or 0)}}
+
+
+def arb_check(m, now):
+    """ARB 100% neutro: compra o PAR se Sum(ask)<1, ou vende o PAR se Sum(bid)>1 — sempre as duas pernas juntas."""
+    if now - m.get("arb_last", 0) < ARB_COOLDOWN:
+        return
+    up = dn = None
+    for tk, out in m["tokens"].items():
+        if out == "Up":
+            up = tk
+        elif out == "Down":
+            dn = tk
+    if not up or not dn:
+        return
+    bu = m["books"].get(up) or {}
+    bd = m["books"].get(dn) or {}
+    aU, aD = bu.get("ba"), bd.get("ba")     # ask: o que pagamos p/ comprar
+    bU, bD = bu.get("bb"), bd.get("bb")     # bid: o que recebemos ao vender
+
+    def fee(p):
+        return ARB_THETA * ARB_SIZE * p * (1 - p)
+
+    if aU and aD:
+        prof = 1.0 - (aU + aD) - (fee(aU) + fee(aD))
+        if prof > ARB_MARGIN:
+            m["arb_last"] = now
+            with LOCK:
+                a = STATE["arb"]
+                a["pnl"] += round(prof, 4); a["sets"] += 1; a["buy"] += 1
+                a["events"].insert(0, {"ts": int(now), "asset": m["asset"].upper(),
+                                       "side": "BUY par", "combo": round(aU + aD, 4), "profit": round(prof, 4)})
+                a["events"] = a["events"][:60]
+            return
+    if bU and bD:
+        prof = (bU + bD) - 1.0 - (fee(bU) + fee(bD))
+        if prof > ARB_MARGIN:
+            m["arb_last"] = now
+            with LOCK:
+                a = STATE["arb"]
+                a["pnl"] += round(prof, 4); a["sets"] += 1; a["sell"] += 1
+                a["events"].insert(0, {"ts": int(now), "asset": m["asset"].upper(),
+                                       "side": "SELL par", "combo": round(bU + bD, 4), "profit": round(prof, 4)})
+                a["events"] = a["events"][:60]
 
 
 def on_trade(m, ev):
@@ -687,6 +739,7 @@ def snapshot():
                 "target_trades": tgt, "match": match,
                 "mirror": mstat, "onchain": dict(STATE["onchain"]),
                 "anon": anon, "likeanon": likeanon,
+                "arb": dict(STATE["arb"]),
                 "signer": {"wallet": clob_signer.wallet(), "err": clob_signer._state["err"],
                            "post": os.environ.get("POLY_POST") == "1"},
                 "totals": t, "errors": STATE["errors"], "target": TARGET_WALLET}
@@ -722,6 +775,7 @@ canvas{width:100%;background:#0d1118;border:1px solid var(--line);border-radius:
 <div><span class="badge" id="mode">…</span> <span class="small" id="upd"></span></div></header>
 <nav class="tabs"><button id="tab-mm" class="on" onclick="showTab('mm')">⚙ MM (atual)</button>
 <button id="tab-anon" onclick="showTab('anon')">⚖ Anon vs LikeAnon</button>
+<button id="tab-arb" onclick="showTab('arb')">🎯 ARB 100% neutro</button>
 <a href="/" style="margin-left:auto;color:var(--mut);font-size:12px;align-self:center">refresh</a></nav>
 <div class="wrap" id="mmview">
  <div class="grid" id="cards"></div>
@@ -757,6 +811,11 @@ canvas{width:100%;background:#0d1118;border:1px solid var(--line);border-radius:
    <h2 style="color:#2ea043;margin:10px 0 4px">NOSSAS ENTRADAS ($)</h2><div id="laentries"></div>
   </div>
  </div>
+</div>
+<div class="wrap" id="arbview" style="display:none">
+ <div class="grid" id="arbcards"></div>
+ <h2 style="color:#d29922">ARB — operações travadas (par comprado/vendido junto) · <span class="small">0% direcional por construção</span></h2>
+ <div id="arbbody"></div>
 </div><script>
 function f(x,d){return x==null?'—':Number(x).toFixed(d==null?2:d)}
 function money(x){return `<span class="${x>=0?'g':'r'}">${x>=0?'+':''}$${f(x)}</span>`}
@@ -783,8 +842,10 @@ window._anonPeriod='1d';
 function drawAnon(iv){window._anonPeriod=iv;const an=(window._lastState||{}).anon;if(!an||!an.curves||!an.curves[iv])return;drawChart(document.getElementById('anonchart'),an.curves[iv].map(p=>p[1]),'#4c8dff');}
 function showTab(t){document.getElementById('mmview').style.display=(t==='mm')?'':'none';
  document.getElementById('anonview').style.display=(t==='anon')?'':'none';
+ document.getElementById('arbview').style.display=(t==='arb')?'':'none';
  document.getElementById('tab-mm').className=(t==='mm')?'on':'';
- document.getElementById('tab-anon').className=(t==='anon')?'on':'';}
+ document.getElementById('tab-anon').className=(t==='anon')?'on':'';
+ document.getElementById('tab-arb').className=(t==='arb')?'on':'';}
 async function tick(){let s;try{s=await(await fetch('/state')).json()}catch(e){return}
  window._lastState=s;
  document.getElementById('mode').textContent=s.mode+' · '+s.ws;
@@ -874,7 +935,18 @@ async function tick(){let s;try{s=await(await fetch('/state')).json()}catch(e){r
  document.getElementById('laentries').innerHTML=(la.entries&&la.entries.length)?ent+'</table>':'<div class="small">sem entradas ainda…</div>';
  document.getElementById('lashow').textContent='banca ATUAL $'+f(la.banca)+' (início $100) · caixa aberto $'+f(la.open_cash)+' · '+(la.fills||0)+' entradas';
  drawChart(document.getElementById('lachart'),(la.equity||[]),'#2ea043');
- drawAnon(window._anonPeriod);}
+ drawAnon(window._anonPeriod);
+ // ==== ARB 100% neutro ====
+ const ar=s.arb||{pnl:0,sets:0,buy:0,sell:0,events:[]};
+ document.getElementById('arbcards').innerHTML=
+  `<div class="card"><div class="k">PnL travado (arb)</div><div class="v ${ar.pnl>=0?'g':'r'}">$${f(ar.pnl)}</div></div>`
+  +`<div class="card"><div class="k">Pares executados</div><div class="v">${ar.sets}</div></div>`
+  +`<div class="card"><div class="k">Comprou par (Σask&lt;1)</div><div class="v">${ar.buy}</div></div>`
+  +`<div class="card"><div class="k">Vendeu par (Σbid&gt;1)</div><div class="v">${ar.sell}</div></div>`
+  +`<div class="card"><div class="k">Direcional</div><div class="v g">0% ✓</div><div class="small">sempre as 2 pernas juntas</div></div>`;
+ let ab='<table><tr><th>hora</th><th>ativo</th><th>tipo</th><th>Σ preço</th><th>lucro/par</th></tr>';
+ for(const e of (ar.events||[])){ab+=`<tr><td>${new Date(e.ts*1000).toLocaleTimeString()}</td><td>${e.asset}</td><td>${e.side}</td><td>${f(e.combo,3)}</td><td class="g">$${f(e.profit,4)}</td></tr>`}
+ document.getElementById('arbbody').innerHTML=(ar.events&&ar.events.length)?ab+'</table>':'<div class="small">sem oportunidade ainda — Σask&lt;1 ou Σbid&gt;1 é raro. aguardando…</div>';}
 tick();setInterval(tick,1200);
 </script></body></html>"""
 
