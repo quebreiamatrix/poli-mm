@@ -220,6 +220,7 @@ def on_book(m, ev):
         "bb": bb[0] if bb else None, "bb_sz": bb[1] if bb else 0,
         "ba": ba[0] if ba else None, "ba_sz": ba[1] if ba else 0,
         "mid": ((bb[0] + ba[0]) / 2) if (bb and ba) else (bb[0] if bb else (ba[0] if ba else None)),
+        "ts": time.time(),
     }
     STATE["books_seen"] += 1
     db.tick(tok, m["books"][tok].get("bb"), m["books"][tok].get("ba"),
@@ -243,6 +244,7 @@ def on_price_change(m, ev):
             b["ba"] = float(c["best_ask"])
         if b.get("bb") is not None and b.get("ba") is not None:
             b["mid"] = (b["bb"] + b["ba"]) / 2
+        b["ts"] = time.time()
         touched.add(tok)
     STATE["books_seen"] += len(touched)
     for tok in touched:
@@ -283,13 +285,17 @@ def arb_check(m, now):
         return
     bu = m["books"].get(up) or {}
     bd = m["books"].get(dn) or {}
+    nu = bu.get("ts") or 0
+    nd = bd.get("ts") or 0
+    if now - nu > 2 or now - nd > 2:        # exige os DOIS livros frescos (<2s)
+        return
     aU, aD = bu.get("ba"), bd.get("ba")     # ask: o que pagamos p/ comprar
     bU, bD = bu.get("bb"), bd.get("bb")     # bid: o que recebemos ao vender
 
     def fee(p):
         return ARB_THETA * ARB_SIZE * p * (1 - p)
 
-    if aU and aD:
+    if aU and aD and 0.90 <= (aU + aD) < 0.995:      # faixa sana de arb real
         prof = 1.0 - (aU + aD) - (fee(aU) + fee(aD))
         if prof > ARB_MARGIN:
             m["arb_last"] = now
@@ -300,7 +306,7 @@ def arb_check(m, now):
                                        "side": "BUY par", "combo": round(aU + aD, 4), "profit": round(prof, 4)})
                 a["events"] = a["events"][:60]
             return
-    if bU and bD:
+    if bU and bD and 1.005 < (bU + bD) <= 1.10:      # faixa sana de arb real
         prof = (bU + bD) - 1.0 - (fee(bU) + fee(bD))
         if prof > ARB_MARGIN:
             m["arb_last"] = now
