@@ -70,7 +70,7 @@ TARGET_WALLET = {
 ANON_ADDR = "0x5916ce250c0b3e32eed3303ffb2938cab0b42a0b"
 LA_ORD = 30               # tamanho da nossa ordem (ask) — min 5 shares
 LA_MAX_PER_TOKEN = 1500
-LA_NET_CAP = 5
+LA_NET_CAP = 3           # teto de exposicao direcional (mantem quase NEUTRO)
 LA_BANCA = 100.0
 LA_USD = 75.0
 HAIRCUT = 1.0             # FIFO ja e a calibracao; haircut extra opcional
@@ -362,6 +362,16 @@ def on_trade(m, ev):
                         gcash = sum(mm["la"]["cash"] for mm in STATE["markets"].values())
                     need = min(need, max(0.0, gcash + LA_BANCA), max(0.0, LA_USD - la["split"]))
                     qty = min(qty, la["inv"][tok] + need)
+                # trava de EXPOSICAO LIQUIDA GLOBAL (no maximo 3)
+                with LOCK:
+                    gnet = 0.0
+                    for mm in STATE["markets"].values():
+                        u = next((k for k, v in mm["tokens"].items() if v == "Up"), None)
+                        d = next((k for k, v in mm["tokens"].items() if v == "Down"), None)
+                        if u and d:
+                            gnet += mm["la"]["inv"].get(u, 0) - mm["la"]["inv"].get(d, 0)
+                dsign = 1.0 if m["tokens"][tok] == "Down" else -1.0
+                qty = min(qty, max(0.0, 3.0 - dsign * gnet))
                 qty = int(qty)
                 if qty > 0:
                     if need > 0:
