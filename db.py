@@ -30,10 +30,13 @@ CREATE TABLE IF NOT EXISTS resolutions(
 CREATE INDEX IF NOT EXISTS ix_ticks_ts ON ticks(ts);
 CREATE INDEX IF NOT EXISTS ix_trades_ts ON trades(ts);
 CREATE INDEX IF NOT EXISTS ix_lafill_ts ON la_fills(ts);
+CREATE TABLE IF NOT EXISTS arb_events(
+  ts INT, asset TEXT, side TEXT, combo REAL, profit REAL,
+  cap_sh REAL, cap_usd REAL, prof_cap REAL);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
-DATA_TABLES = ("ticks", "trades", "la_fills", "anon_fills", "resolutions", "markets")
+DATA_TABLES = ("ticks", "trades", "la_fills", "anon_fills", "resolutions", "markets", "arb_events")
 
 
 def init(path):
@@ -149,3 +152,8 @@ def anon_fill(ts, token, side, price, size):
 def resolution(condition, winner, ts=None):
     _ins("INSERT OR REPLACE INTO resolutions VALUES (?,?,?)",
          (condition, winner, int(ts or time.time())))
+
+
+def arb_event(ts, asset, side, combo, profit, cap_sh, cap_usd, prof_cap):
+    _ins("INSERT INTO arb_events VALUES (?,?,?,?,?,?,?,?)",
+         (int(ts), asset, side, combo, profit, cap_sh, cap_usd, prof_cap))

@@ -80,6 +80,7 @@ ARB_SIZE = 10             # shares por perna do par
 ARB_THETA = 0.07          # taker fee (crypto): fee = theta * C * p * (1-p)
 ARB_MARGIN = 0.0          # lucro minimo exigido (apos taxas) por par
 ARB_COOLDOWN = 5          # s entre disparos no mesmo mercado
+ARB_RTT_MS = 300          # RTT assumido de ORDEM (Railway ~ 300ms; colocado ~ 30ms)
 MATCH_WINDOW_S = 20        # "entramos junto" = fill nosso na mesma moeda em +/- 20s
 
 # --- feed on-chain em tempo real da carteira alvo ---
@@ -112,7 +113,9 @@ STATE = {
     "pnl_series": [],            # [(epoch, pnl_total)] amostrado ao vivo
     "onchain": {"last_block": 0, "events": 0, "err": ""},
     "mirror": {"n": 0, "slip_sum": 0.0, "late_sum": 0.0},
-    "arb": {"pnl": 0.0, "sets": 0, "buy": 0, "sell": 0, "events": [], "last_opp": 0},
+    "arb": {"pnl": 0.0, "sets": 0, "buy": 0, "sell": 0, "events": [], "last_opp": 0,
+            "pnl_cap": 0.0, "cap_usd": 0.0, "cap_sh": 0.0,
+            "lat": [], "dur_buy": [], "dur_sell": [], "rtt_ms": ARB_RTT_MS},
     "peak_open": 0.0,            # maior exposicao (USDC) ja empregada
     "la_peak": 0.0,              # maior capital aberto do LikeAnon
     "anon": {"trades": [], "sell_usdc": 0.0, "split": 0.0, "merge": 0.0, "redeem": 0.0,
@@ -171,6 +174,93 @@ def log_err(msg):
         STATE["errors"] = STATE["errors"][-20:]
 
 
+def _pct(arr, p):
+    if not arr:
+        return None
+    s = sorted(arr)
+    k = min(len(s) - 1, int(len(s) * p / 100.0))
+    return round(s[k], 1)
+
+
+def _arb_snap():
+    """Resumo do arb + veredito Railway vs colocado (janela dura > latencia+RTT?)."""
+    src = STATE["arb"]
+    a = dict(src)
+    a.pop("lat", None); a.pop("dur_buy", None); a.pop("dur_sell", None)
+    a["lat_p50"] = _pct(src.get("lat"), 50)
+    a["lat_p90"] = _pct(src.get("lat"), 90)
+    a["buy_p50"] = _pct(src.get("dur_buy"), 50)
+    a["buy_p90"] = _pct(src.get("dur_buy"), 90)
+    a["sell_p50"] = _pct(src.get("dur_sell"), 50)
+    a["n_lat"] = len(src.get("lat") or [])
+    a["n_win"] = len(src.get("dur_buy") or []) + len(src.get("dur_sell") or [])
+    best = None
+    for arr in (src.get("dur_buy"), src.get("dur_sell")):
+        m = _pct(arr, 50)
+        if m is not None and (best is None or m > best):
+            best = m
+    a["win_p50"] = best
+    a["need_ms"] = round((a.get("lat_p90") or 0) + (src.get("rtt_ms") or 300), 0)
+    if best is None or a["lat_p90"] is None:
+        a["verdict"] = "coletando…"; a["feasible"] = None
+    elif best > a["need_ms"]:
+        a["verdict"] = "Railway OK"; a["feasible"] = True
+    else:
+        a["verdict"] = "só colocado"; a["feasible"] = False
+    return a
+
+
+def _lat_sample(ev):
+    t = ev.get("timestamp")
+    if not t:
+        return
+    try:
+        with LOCK:
+            a = STATE["arb"]
+            a["lat"].append(round(time.time() * 1000 - float(t), 0))
+            a["lat"] = a["lat"][-300:]
+    except Exception:
+        pass
+
+
+def arb_window(m, now):
+    """Mede a DURACAO da janela de arb (Sigma ask<1 / Sigma bid>1) por mercado."""
+    up = dn = None
+    for tk, out in m["tokens"].items():
+        if out == "Up":
+            up = tk
+        elif out == "Down":
+            dn = tk
+    if not up or not dn:
+        return
+    bu = m["books"].get(up) or {}
+    bd = m["books"].get(dn) or {}
+    if now - (bu.get("ts") or 0) > 2 or now - (bd.get("ts") or 0) > 2:
+        return
+    aU, aD = bu.get("ba"), bd.get("ba")
+    bU, bD = bu.get("bb"), bd.get("bb")
+    if aU and aD:
+        if aU + aD < 1.0:
+            if m.get("arb_lo") is None:
+                m["arb_lo"] = now
+        elif m.get("arb_lo") is not None:
+            with LOCK:
+                a = STATE["arb"]
+                a["dur_buy"].append(round((now - m["arb_lo"]) * 1000.0, 0))
+                a["dur_buy"] = a["dur_buy"][-300:]
+            m["arb_lo"] = None
+    if bU and bD:
+        if bU + bD > 1.0:
+            if m.get("arb_hi") is None:
+                m["arb_hi"] = now
+        elif m.get("arb_hi") is not None:
+            with LOCK:
+                a = STATE["arb"]
+                a["dur_sell"].append(round((now - m["arb_hi"]) * 1000.0, 0))
+                a["dur_sell"] = a["dur_sell"][-300:]
+            m["arb_hi"] = None
+
+
 def mk_market(slug, asset, cid, tokens):
     return {"slug": slug, "asset": asset, "cid": cid, "tokens": tokens,
             "start": int(slug.rsplit("-", 1)[1]),
@@ -225,7 +315,9 @@ def on_book(m, ev):
     STATE["books_seen"] += 1
     db.tick(tok, m["books"][tok].get("bb"), m["books"][tok].get("ba"),
             m["books"][tok].get("bb_sz"), m["books"][tok].get("ba_sz"))
+    _lat_sample(ev)
     quote(m, tok)
+    arb_window(m, time.time())
     arb_check(m, time.time())
 
 
@@ -247,8 +339,10 @@ def on_price_change(m, ev):
         b["ts"] = time.time()
         touched.add(tok)
     STATE["books_seen"] += len(touched)
+    _lat_sample(ev)
     for tok in touched:
         quote(m, tok)
+    arb_window(m, time.time())
     arb_check(m, time.time())
 
 
@@ -272,7 +366,8 @@ def quote(m, tok):
 
 
 def arb_check(m, now):
-    """ARB 100% neutro: compra o PAR se Sum(ask)<1, ou vende o PAR se Sum(bid)>1 — sempre as duas pernas juntas."""
+    """ARB 100% neutro: compra o PAR se Sum(ask)<1, ou vende o PAR se Sum(bid)>1.
+    Mede tambem o CAPITAL CAPTURAVEL (profundidade no melhor nivel) -> $ real."""
     if now - m.get("arb_last", 0) < ARB_COOLDOWN:
         return
     up = dn = None
@@ -292,30 +387,50 @@ def arb_check(m, now):
     aU, aD = bu.get("ba"), bd.get("ba")     # ask: o que pagamos p/ comprar
     bU, bD = bu.get("bb"), bd.get("bb")     # bid: o que recebemos ao vender
 
-    def fee(p):
-        return ARB_THETA * ARB_SIZE * p * (1 - p)
+    def fee1(p):
+        return ARB_THETA * p * (1 - p)      # taxa por share
 
     if aU and aD and 0.90 <= (aU + aD) < 0.995:      # faixa sana de arb real
-        prof = 1.0 - (aU + aD) - (fee(aU) + fee(aD))
-        if prof > ARB_MARGIN:
+        per = 1.0 - (aU + aD) - (fee1(aU) + fee1(aD))
+        if per > ARB_MARGIN:
+            cap_sh = min(bu.get("ba_sz") or 0, bd.get("ba_sz") or 0)   # profundidade real
+            cap_usd = cap_sh * (aU + aD)
+            prof_cap = per * cap_sh
             m["arb_last"] = now
             with LOCK:
                 a = STATE["arb"]
-                a["pnl"] += round(prof, 4); a["sets"] += 1; a["buy"] += 1
-                a["events"].insert(0, {"ts": int(now), "asset": m["asset"].upper(),
-                                       "side": "BUY par", "combo": round(aU + aD, 4), "profit": round(prof, 4)})
+                a["pnl"] += round(per, 4); a["sets"] += 1; a["buy"] += 1
+                a["pnl_cap"] += round(prof_cap, 4)
+                a["cap_usd"] += round(cap_usd, 2)
+                a["cap_sh"] += round(cap_sh, 1)
+                a["events"].insert(0, {"ts": int(now), "asset": m["asset"].upper(), "side": "BUY par",
+                                       "combo": round(aU + aD, 4), "profit": round(per, 4),
+                                       "cap_sh": round(cap_sh, 1), "cap_usd": round(cap_usd, 2),
+                                       "prof_cap": round(prof_cap, 4)})
                 a["events"] = a["events"][:60]
+            db.arb_event(int(now), m["asset"].upper(), "BUY par", round(aU + aD, 4), round(per, 4),
+                         round(cap_sh, 2), round(cap_usd, 2), round(prof_cap, 4))
             return
     if bU and bD and 1.005 < (bU + bD) <= 1.10:      # faixa sana de arb real
-        prof = (bU + bD) - 1.0 - (fee(bU) + fee(bD))
-        if prof > ARB_MARGIN:
+        per = (bU + bD) - 1.0 - (fee1(bU) + fee1(bD))
+        if per > ARB_MARGIN:
+            cap_sh = min(bu.get("bb_sz") or 0, bd.get("bb_sz") or 0)
+            cap_usd = cap_sh * (bU + bD)
+            prof_cap = per * cap_sh
             m["arb_last"] = now
             with LOCK:
                 a = STATE["arb"]
-                a["pnl"] += round(prof, 4); a["sets"] += 1; a["sell"] += 1
-                a["events"].insert(0, {"ts": int(now), "asset": m["asset"].upper(),
-                                       "side": "SELL par", "combo": round(bU + bD, 4), "profit": round(prof, 4)})
+                a["pnl"] += round(per, 4); a["sets"] += 1; a["sell"] += 1
+                a["pnl_cap"] += round(prof_cap, 4)
+                a["cap_usd"] += round(cap_usd, 2)
+                a["cap_sh"] += round(cap_sh, 1)
+                a["events"].insert(0, {"ts": int(now), "asset": m["asset"].upper(), "side": "SELL par",
+                                       "combo": round(bU + bD, 4), "profit": round(per, 4),
+                                       "cap_sh": round(cap_sh, 1), "cap_usd": round(cap_usd, 2),
+                                       "prof_cap": round(prof_cap, 4)})
                 a["events"] = a["events"][:60]
+            db.arb_event(int(now), m["asset"].upper(), "SELL par", round(bU + bD, 4), round(per, 4),
+                         round(cap_sh, 2), round(cap_usd, 2), round(prof_cap, 4))
 
 
 def on_trade(m, ev):
@@ -755,7 +870,7 @@ def snapshot():
                 "target_trades": tgt, "match": match,
                 "mirror": mstat, "onchain": dict(STATE["onchain"]),
                 "anon": anon, "likeanon": likeanon,
-                "arb": dict(STATE["arb"]),
+                "arb": _arb_snap(),
                 "signer": {"wallet": clob_signer.wallet(), "err": clob_signer._state["err"],
                            "post": os.environ.get("POLY_POST") == "1"},
                 "totals": t, "errors": STATE["errors"], "target": TARGET_WALLET}
@@ -955,13 +1070,17 @@ async function tick(){let s;try{s=await(await fetch('/state')).json()}catch(e){r
  // ==== ARB 100% neutro ====
  const ar=s.arb||{pnl:0,sets:0,buy:0,sell:0,events:[]};
  document.getElementById('arbcards').innerHTML=
-  `<div class="card"><div class="k">PnL travado (arb)</div><div class="v ${ar.pnl>=0?'g':'r'}">$${f(ar.pnl)}</div></div>`
+  `<div class="card"><div class="k">Lucro capturável (Σ)</div><div class="v g">$${f(ar.pnl_cap)}</div><div class="small">edge × profundidade real</div></div>`
+  +`<div class="card"><div class="k">Capital capturável (Σ)</div><div class="v b">$${f(ar.cap_usd)}</div><div class="small">${f(ar.cap_sh,0)} shares (no melhor nível)</div></div>`
+  +`<div class="card"><div class="k">PnL travado (por par)</div><div class="v ${ar.pnl>=0?'g':'r'}">$${f(ar.pnl)}</div><div class="small">soma do edge/par (teórico)</div></div>`
   +`<div class="card"><div class="k">Pares executados</div><div class="v">${ar.sets}</div></div>`
-  +`<div class="card"><div class="k">Comprou par (Σask&lt;1)</div><div class="v">${ar.buy}</div></div>`
-  +`<div class="card"><div class="k">Vendeu par (Σbid&gt;1)</div><div class="v">${ar.sell}</div></div>`
-  +`<div class="card"><div class="k">Direcional</div><div class="v g">0% ✓</div><div class="small">sempre as 2 pernas juntas</div></div>`;
- let ab='<table><tr><th>hora</th><th>ativo</th><th>tipo</th><th>Σ preço</th><th>lucro/par</th></tr>';
- for(const e of (ar.events||[])){ab+=`<tr><td>${new Date(e.ts*1000).toLocaleTimeString()}</td><td>${e.asset}</td><td>${e.side}</td><td>${f(e.combo,3)}</td><td class="g">$${f(e.profit,4)}</td></tr>`}
+  +`<div class="card"><div class="k">Comprou / Vendeu par</div><div class="v">${ar.buy} / ${ar.sell}</div></div>`
+  +`<div class="card"><div class="k">Direcional</div><div class="v g">0% ✓</div><div class="small">sempre as 2 pernas juntas</div></div>`
+  +`<div class="card"><div class="k">Latência do feed (p50/p90)</div><div class="v y">${ar.lat_p50==null?'—':f(ar.lat_p50,0)} / ${ar.lat_p90==null?'—':f(ar.lat_p90,0)} ms</div><div class="small">${ar.n_lat||0} amostras (WS)</div></div>`
+  +`<div class="card"><div class="k">Duração da janela (p50)</div><div class="v y">${ar.win_p50==null?'—':f(ar.win_p50,0)} ms</div><div class="small">${ar.n_win||0} janelas · buy ${ar.buy_p50==null?'—':f(ar.buy_p50,0)} · sell ${ar.sell_p50==null?'—':f(ar.sell_p50,0)}</div></div>`
+  +`<div class="card"><div class="k">Pega na Railway?</div><div class="v ${ar.feasible===true?'g':(ar.feasible===false?'r':'')}">${ar.verdict||'—'}</div><div class="small">janela ${ar.win_p50==null?'—':f(ar.win_p50,0)}ms vs precisa ${ar.need_ms==null?'—':f(ar.need_ms,0)}ms</div></div>`;
+ let ab='<table><tr><th>hora</th><th>ativo</th><th>tipo</th><th>Σ preço</th><th>edge/sh</th><th>cap (sh)</th><th>capital $</th><th>lucro capturável</th></tr>';
+ for(const e of (ar.events||[])){ab+=`<tr><td>${new Date(e.ts*1000).toLocaleTimeString()}</td><td>${e.asset}</td><td>${e.side}</td><td>${f(e.combo,3)}</td><td class="g">${f(100*e.profit,2)}%</td><td>${f(e.cap_sh,0)}</td><td>$${f(e.cap_usd)}</td><td class="g">$${f(e.prof_cap,3)}</td></tr>`}
  document.getElementById('arbbody').innerHTML=(ar.events&&ar.events.length)?ab+'</table>':'<div class="small">sem oportunidade ainda — Σask&lt;1 ou Σbid&gt;1 é raro. aguardando…</div>';}
 tick();setInterval(tick,1200);
 </script></body></html>"""
