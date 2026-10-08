@@ -854,6 +854,9 @@ async function tick(){let s;try{s=await(await fetch('/state')).json()}catch(e){r
  document.getElementById('anonoc').innerHTML=(an.oc_fills&&an.oc_fills.length)?ao+'</table>':'<div class="small">sem fills on-chain do Anon ainda…</div>';
  let lh='<div class="grid" style="margin-bottom:10px">'
   +`<div class="card"><div class="k">Tempo de coleta</div><div class="v b">${fmtDur(s.collect_s)}</div><div class="small">último reset</div></div>`
+  +`<div class="card"><div class="k">Direcional? (auditoria)</div><div class="v ${la.directional?'r':'g'}">${la.directional?'SIM':'NÃO ✓'}</div><div class="small">${la.directional?'FALHOU a neutralidade':'neutro, cumprindo a regra'}</div></div>`
+  +`<div class="card"><div class="k">Exposição líquida (Up−Down)</div><div class="v ${Math.abs(la.net)>10?'r':'g'}">${f(la.net,1)}</div><div class="small">tem que ficar ~0</div></div>`
+  +`<div class="card"><div class="k">Entrou junto (Anon)</div><div class="v ${an.match.pct>30?'g':'r'}">${f(an.match.pct,0)}%</div><div class="small">${an.match.matched}/${an.match.n}</div></div>`
   +`<div class="card"><div class="k">PnL realizado</div><div class="v ${la.realized>=0?'g':'r'}">$${f(la.realized)}</div><div class="small">${la.settled.length} merc</div></div>`
   +`<div class="card"><div class="k">Caixa aberto</div><div class="v">$${f(la.open_cash)}</div></div>`
   +`<div class="card"><div class="k">Vendido</div><div class="v">${f(la.sold,0)} sh</div></div>`
@@ -862,8 +865,6 @@ async function tick(){let s;try{s=await(await fetch('/state')).json()}catch(e){r
   +`<div class="card"><div class="k">Pico aberto</div><div class="v">$${f(la.peak)}</div><div class="small">máx. de $100</div></div>`
   +`<div class="card"><div class="k">Seleção adversa</div><div class="v ${la.adverse>0?'r':'g'}">$${f(la.adverse)}</div><div class="small">${la.adv_n} amostras</div></div>`
   +`<div class="card"><div class="k">PnL AJUSTADO</div><div class="v ${la.pnl_adj>=0?'g':'r'}">$${f(la.pnl_adj)}</div><div class="small">conservador</div></div>`
-  +`<div class="card"><div class="k">Exposição líquida (Up−Down)</div><div class="v">${f(la.net,1)}</div><div class="small">tem que ficar ~0</div></div>`
-  +`<div class="card"><div class="k">Direcional?</div><div class="v ${la.directional?'r':'g'}">${la.directional?'SIM':'NÃO ✓'}</div><div class="small">${la.directional?'falhou a neutralidade':'neutro, cumprindo a regra'}</div></div>`
   +`<div class="card"><div class="k">Inventário (Up · Down)</div><div class="v" style="font-size:14px">${f(la.inv.Up||0,1)} · ${f(la.inv.Down||0,1)}</div></div></div>`;
  lh+='<table><tr><th>mercado</th><th>PnL</th><th>vendido</th><th>split</th></tr>';
  for(const r of la.settled){lh+=`<tr><td>${r.slug}</td><td class="${r.pnl>=0?'g':'r'}">$${f(r.pnl)}</td><td>${f(r.sold,0)}</td><td>${f(r.split,0)}</td></tr>`}
